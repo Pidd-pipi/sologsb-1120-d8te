@@ -54,3 +54,31 @@ export function secondsToText(seconds: number): string {
   const s = Math.round(seconds % 60);
   return `${m} 分 ${s} 秒`;
 }
+
+/** 当日 00:00:00.000（检定开始按整天） */
+export function startOfDay(t: number = Date.now()): number {
+  const d = new Date(t);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/** 当日 23:59:59.999（检定有效期截至当天结束） */
+export function endOfDay(t: number = Date.now()): number {
+  const d = new Date(t);
+  d.setHours(23, 59, 59, 999);
+  return d.getTime();
+}
+
+/** 分钟 → 毫秒 */
+export function minutes(ms: number): number {
+  return ms * 60_000;
+}
+
+/**
+ * el-date-picker（type=datetime）值规整：秒与毫秒清零，避免时段边界对不齐。
+ */
+export function truncateToMinute(t: number): number {
+  const d = new Date(t);
+  d.setSeconds(0, 0);
+  return d.getTime();
+}

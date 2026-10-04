@@ -5,18 +5,21 @@ import { ElMessage } from 'element-plus';
 import { useClockStore } from '../stores/clockStore';
 import { usePartStore } from '../stores/partStore';
 import { useStepStore } from '../stores/stepStore';
+import { useInstrumentStore } from '../stores/instrumentStore';
 import { useRepairProgress } from '../hooks/useRepairProgress';
+import { repairStateOf, testEvidenceSummary } from '../utils/repairState';
 import StepSequence from '../components/common/StepSequence.vue';
 import RateChart from '../components/common/RateChart.vue';
 import StateBadge from '../components/common/StateBadge.vue';
 import { CONDITION_GRADES, type ConditionGrade } from '../types/clock';
-import { judgeTest } from '../types/test';
+import { judgeTest, TEST_VALIDITY_META } from '../types/test';
 
 const route = useRoute();
 const router = useRouter();
 const clockStore = useClockStore();
 const partStore = usePartStore();
 const stepStore = useStepStore();
+const instrumentStore = useInstrumentStore();
 
 const clockId = computed(() => String(route.params.id ?? ''));
 const clock = computed(() => clockStore.byId(clockId.value));
@@ -24,6 +27,17 @@ const { progress, steps, done, total, percent, current, gaps } = useRepairProgre
 const parts = computed(() => partStore.byClock(clockId.value));
 const tests = computed(() => stepStore.testsByClock(clockId.value));
 const activeTab = ref('steps');
+
+const repairState = computed(() => repairStateOf(steps.value, tests.value));
+const evidenceSummary = computed(() => testEvidenceSummary(tests.value));
+
+function instrumentCodeOf(id?: string): string {
+  if (!id) return '未登记仪器';
+  return instrumentStore.byId(id)?.code ?? '未知仪器';
+}
+function validityOf(row: { validity?: keyof typeof TEST_VALIDITY_META }) {
+  return TEST_VALIDITY_META[row.validity ?? 'pending_evidence'];
+}
 
 async function finish(id: string) {
   await stepStore.finish(id);
@@ -54,6 +68,7 @@ async function changeGrade(value: unknown) {
 onMounted(async () => {
   await clockStore.load();
   await partStore.load();
+  await instrumentStore.load();
   await stepStore.load();
 });
 </script>
@@ -65,6 +80,11 @@ onMounted(async () => {
       <StateBadge v-if="clock" :grade="clock.conditionGrade" />
       <el-tag v-if="gaps.length" type="danger">顺序号缺口：{{ gaps.join('、') }}</el-tag>
       <el-tag v-else type="success" effect="plain">顺序号连续</el-tag>
+      <el-tag :type="repairState === '已完成' ? 'success' : repairState === '待测试' ? 'warning' : 'info'">
+        当前结论：{{ repairState }}
+      </el-tag>
+      <el-tag v-if="evidenceSummary.pending > 0" type="warning">待补证 {{ evidenceSummary.pending }}</el-tag>
+      <el-tag v-if="evidenceSummary.invalid > 0" type="danger">失效待复测 {{ evidenceSummary.invalid }}</el-tag>
       <div class="spacer" />
       <el-button type="primary" @click="router.push(`/steps/new?clockId=${clockId}`)">追加维修工序</el-button>
       <el-button @click="router.push(`/tests/${clockId}`)">走时测试录入</el-button>
@@ -133,12 +153,27 @@ onMounted(async () => {
               <el-empty v-if="parts.length === 0" description="暂无零件登记" :image-size="60" />
             </el-tab-pane>
             <el-tab-pane :label="`走时测试（${tests.length}）`" name="tests">
+              <el-alert
+                v-if="evidenceSummary.pending > 0 || evidenceSummary.invalid > 0"
+                :title="
+                  evidenceSummary.pending > 0
+                    ? `有 ${evidenceSummary.pending} 条旧测试查不到所用校表仪，列入待补证，不沿用原合格结果。`
+                    : `有 ${evidenceSummary.invalid} 条测试因仪器补检 / 停用 / 改有效期已失效，完工结论撤下，复测确认后恢复。`
+                "
+                :type="evidenceSummary.pending > 0 ? 'warning' : 'error'"
+                :closable="false"
+                show-icon
+                style="margin-bottom: 10px"
+              />
               <div v-for="t in tests" :key="t.id" class="test-block">
                 <div class="card-head">
                   <strong>{{ new Date(t.testedAt).toLocaleString('zh-CN') }}</strong>
-                  <el-tag size="small" type="success">{{ t.conclusion || judgeTest(t.rate, t.beatError, t.amplitude) }}</el-tag>
+                  <el-tag size="small" effect="plain">{{ t.conclusion || judgeTest(t.rate, t.beatError, t.amplitude) }}</el-tag>
+                  <StateBadge :label="validityOf(t).label" :tone="validityOf(t).type" />
+                  <el-tag size="small" effect="plain">{{ instrumentCodeOf(t.instrumentId) }}</el-tag>
                   <span class="muted">日差 {{ t.rate }} s/d · 摆幅 {{ t.amplitude }}° · 偏振 {{ t.beatError }} ms</span>
                 </div>
+                <div v-if="t.invalidReason" class="invalid-reason">{{ t.invalidReason }}</div>
                 <RateChart :readings="t.positions" />
               </div>
               <el-empty v-if="tests.length === 0" description="暂无走时测试记录" :image-size="60" />
@@ -195,5 +230,11 @@ onMounted(async () => {
 }
 .test-block {
   margin-bottom: 16px;
+}
+.invalid-reason {
+  margin: 6px 0;
+  font-size: 12px;
+  color: #c45656;
+  line-height: 1.6;
 }
 </style>

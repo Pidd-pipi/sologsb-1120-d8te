@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus';
 import { useClockStore } from '../stores/clockStore';
 import { useStepStore } from '../stores/stepStore';
 import { useClockSearch } from '../hooks/useClockSearch';
+import { REPAIR_STATES, repairStateOf } from '../utils/repairState';
 import ClockCard from '../components/common/ClockCard.vue';
 import { CLOCK_KINDS, CONDITION_GRADES, type ClockDraft, type ClockKind, type ConditionGrade } from '../types/clock';
 
@@ -13,28 +14,27 @@ const clockStore = useClockStore();
 const stepStore = useStepStore();
 const { filters, result, options, reset } = useClockSearch();
 
-const REPAIR_STATES = ['未开工', '维修中', '待测试', '已完成'] as const;
-
-type RepairState = (typeof REPAIR_STATES)[number];
-
-/** 由工序与走时测试推导修复状态，用于台账分栏 */
-function repairStateOf(clockId: string): RepairState {
+/** 由工序与走时测试「证据状态」推导修复状态；仪器事件让测试失效后，已完成自动退回待测试 */
+function stateOf(clockId: string) {
   const steps = stepStore.items.filter((s) => s.clockId === clockId);
   const tests = stepStore.tests.filter((t) => t.clockId === clockId);
-  const done = steps.filter((s) => s.state === 'done').length;
-  if (steps.length === 0) return '未开工';
-  if (done === steps.length && tests.length > 0) return '已完成';
-  if (done === steps.length) return '待测试';
-  if (done > 0) return '维修中';
-  return '未开工';
+  return repairStateOf(steps, tests);
 }
 
 const columns = computed(() =>
   REPAIR_STATES.map((state) => ({
     state,
-    rows: result.value.filter((it) => repairStateOf(it.id) === state),
+    rows: result.value.filter((it) => stateOf(it.id) === state),
   })),
 );
+
+function footerOf(clockId: string): string {
+  const steps = stepStore.items.filter((s) => s.clockId === clockId);
+  const tests = stepStore.tests.filter((t) => t.clockId === clockId);
+  const done = steps.filter((s) => s.state === 'done').length;
+  const valid = tests.filter((t) => t.validity === 'valid').length;
+  return `工序 ${done}/${steps.length} · 有效测试 ${valid} 条（共 ${tests.length} 条）`;
+}
 
 const dialogVisible = ref(false);
 const form = reactive<ClockDraft>({
@@ -143,9 +143,7 @@ onMounted(() => {
           v-for="item in col.rows"
           :key="item.id"
           :item="item"
-          :footer="`工序 ${stepStore.items.filter((s) => s.clockId === item.id && s.state === 'done').length}/${
-            stepStore.items.filter((s) => s.clockId === item.id).length
-          } · 走时测试 ${stepStore.tests.filter((t) => t.clockId === item.id).length} 次`"
+          :footer="footerOf(item.id)"
           @open="(id) => router.push(`/clocks/${id}`)"
         />
         <el-empty v-if="col.rows.length === 0" description="暂无" :image-size="60" />

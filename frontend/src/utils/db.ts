@@ -3,10 +3,11 @@ import type { Clock } from '../types/clock';
 import type { MovementPart } from '../types/part';
 import type { RepairStep } from '../types/step';
 import type { TimekeepingTest } from '../types/test';
+import type { Instrument, Calibration, InstrumentEvent, Reservation } from '../types/instrument';
 import { newId } from './id';
 
 export const DB_NAME = 'gbclockrepair';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const LS_VERSION_KEY = 'gbclockrepair:db-version';
 
 class ClockRepairDB extends Dexie {
@@ -14,6 +15,10 @@ class ClockRepairDB extends Dexie {
   parts!: Table<MovementPart, string>;
   steps!: Table<RepairStep, string>;
   tests!: Table<TimekeepingTest, string>;
+  instruments!: Table<Instrument, string>;
+  calibrations!: Table<Calibration, string>;
+  instrumentEvents!: Table<InstrumentEvent, string>;
+  reservations!: Table<Reservation, string>;
 
   constructor() {
     super(DB_NAME);
@@ -48,6 +53,30 @@ class ClockRepairDB extends Dexie {
             if (row.positions === undefined) row.positions = [];
           });
       });
+    // v3：仪器台账（校表仪 + 检定 + 事件）与占台预约；测试挂仪器与证据状态
+    this.version(3)
+      .stores({
+        clocks: 'id, clockNo, kind, caliber, conditionGrade, createdAt',
+        parts: 'id, clockId, name, wearState, decision, sourceLot',
+        steps: 'id, clockId, seq, stepType, state, startedAt',
+        tests: 'id, clockId, testedAt, conclusion, instrumentId, validity',
+        instruments: 'id, code, status, activeCalibrationId',
+        calibrations: 'id, instrumentId, calibratedAt, validUntil',
+        instrumentEvents: 'id, instrumentId, happenedAt, type',
+        reservations: 'id, instrumentId, clockId, slotStart, slotEnd, expiresAt',
+      })
+      .upgrade(async (tx) => {
+        // 旧测试没有仪器记录：列入待补证，不沿用原合格结论
+        await tx
+          .table('tests')
+          .toCollection()
+          .modify((row: any) => {
+            if (!row.instrumentId) {
+              row.validity = 'pending_evidence';
+              row.invalidReason = '旧测试无仪器记录，须补证或复测，不沿用原合格结果';
+            }
+          });
+      });
   }
 }
 
@@ -78,6 +107,18 @@ export function readDbVersion(): number {
   }
 }
 
+/** 当日 00:00 / 23:59:59.999，便于检定有效期按整天判断 */
+function startOfDay(t: number): number {
+  const d = new Date(t);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+function endOfDay(t: number): number {
+  const d = new Date(t);
+  d.setHours(23, 59, 59, 999);
+  return d.getTime();
+}
+
 /** 首次进入灌入示范数据，保证页面非空壳 */
 export async function ensureSeedData(): Promise<void> {
   const count = await db.clocks.count();
@@ -87,6 +128,8 @@ export async function ensureSeedData(): Promise<void> {
   const day = 24 * 3600 * 1000;
   const clockA = newId('clk');
   const clockB = newId('clk');
+  const instrumentA = newId('ins');
+  const instrumentB = newId('ins');
 
   const clocks: Clock[] = [
     {
@@ -212,8 +255,65 @@ export async function ensureSeedData(): Promise<void> {
     },
   ];
 
+  // 仪器台账：01 在检定有效期内可用；02 已过检，待补检
+  const instruments: Instrument[] = [
+    {
+      id: instrumentA,
+      code: 'BYQ-01',
+      name: '机械校表仪',
+      model: 'Witschi Q-Test 03',
+      maker: 'Witschi',
+      location: '检测室 1 号台',
+      status: 'active',
+      evidenceEpoch: 0,
+      activeCalibrationId: undefined,
+      note: '主力校表仪，走时测试专用',
+      createdAt: now - 180 * day,
+    },
+    {
+      id: instrumentB,
+      code: 'BYQ-02',
+      name: '便携校表仪',
+      model: 'Timegrapher MTG-1900',
+      maker: 'Vibrograf',
+      location: '检测室储物柜',
+      status: 'active',
+      evidenceEpoch: 0,
+      activeCalibrationId: undefined,
+      note: '外修携带用，当前已过检',
+      createdAt: now - 120 * day,
+    },
+  ];
+
+  const calibrationA: Calibration = {
+    id: newId('cal'),
+    instrumentId: instrumentA,
+    calibratedAt: startOfDay(now - 60 * day),
+    validUntil: endOfDay(now + 30 * day),
+    certNo: 'JL-2026-0317',
+    org: '市计量检测院',
+    supplementary: false,
+    note: '周期检定合格',
+    createdAt: now - 60 * day,
+  };
+  instruments[0].activeCalibrationId = calibrationA.id;
+  const calibrationB: Calibration = {
+    id: newId('cal'),
+    instrumentId: instrumentB,
+    calibratedAt: startOfDay(now - 400 * day),
+    validUntil: endOfDay(now - 35 * day),
+    certNo: 'JL-2025-0908',
+    org: '市计量检测院',
+    supplementary: false,
+    note: '上一周期检定，已到期待补检',
+    createdAt: now - 400 * day,
+  };
+  instruments[1].activeCalibrationId = calibrationB.id;
+
+  const validTestTime = now - 1 * day;
   const tests: TimekeepingTest[] = [
     {
+      // 旧测试：无仪器记录 → 待补证，不沿用原「合格」
       id: newId('tst'),
       clockId: clockA,
       testedAt: now - 2 * day,
@@ -228,13 +328,51 @@ export async function ensureSeedData(): Promise<void> {
       ],
       powerReserve: 46,
       conclusion: '合格',
+      validity: 'pending_evidence',
+      invalidReason: '旧测试无仪器记录，须补证或复测，不沿用原合格结果',
+    },
+    {
+      // 有仪器且检定覆盖的有效测试
+      id: newId('tst'),
+      clockId: clockA,
+      testedAt: validTestTime,
+      slotEnd: validTestTime + 30 * 60000,
+      amplitude: 271,
+      beatError: 0.3,
+      rate: 4.2,
+      positions: [
+        { position: '面上', rate: 3.8, amplitude: 275, beatError: 0.3 },
+        { position: '面下', rate: 4.9, amplitude: 266, beatError: 0.4 },
+        { position: '12上', rate: 4.0, amplitude: 272, beatError: 0.3 },
+        { position: '6上', rate: 4.1, amplitude: 271, beatError: 0.3 },
+      ],
+      powerReserve: 48,
+      conclusion: '合格',
+      instrumentId: instrumentA,
+      evidenceEpoch: 0,
+      validity: 'valid',
     },
   ];
 
-  await db.transaction('rw', db.clocks, db.parts, db.steps, db.tests, async () => {
-    await db.clocks.bulkPut(clocks);
-    await db.parts.bulkPut(parts);
-    await db.steps.bulkPut(steps);
-    await db.tests.bulkPut(tests);
-  });
+  await db.transaction(
+    'rw',
+    [
+      db.clocks,
+      db.parts,
+      db.steps,
+      db.tests,
+      db.instruments,
+      db.calibrations,
+      db.instrumentEvents,
+      db.reservations,
+    ],
+    async () => {
+      await db.clocks.bulkPut(clocks);
+      await db.parts.bulkPut(parts);
+      await db.steps.bulkPut(steps);
+      await db.instruments.bulkPut(instruments);
+      await db.calibrations.bulkPut([calibrationA, calibrationB]);
+      await db.tests.bulkPut(tests);
+    },
+  );
 }
