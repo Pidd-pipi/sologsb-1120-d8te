@@ -11,6 +11,7 @@ const activeMenu = computed(() => {
   if (route.path.startsWith('/steps')) return '/steps/new';
   if (route.path.startsWith('/parts')) return '/parts';
   if (route.path.startsWith('/tests')) return '/tests';
+  if (route.path.startsWith('/instruments')) return '/instruments';
   return '/clocks';
 });
 
@@ -34,6 +35,7 @@ function onSelect(index: string) {
         <el-menu-item index="/steps/new">工序录入</el-menu-item>
         <el-menu-item index="/parts">零件清单</el-menu-item>
         <el-menu-item index="/tests">走时测试</el-menu-item>
+        <el-menu-item index="/instruments">仪器台账</el-menu-item>
       </el-menu>
       <el-tag size="small" effect="plain">本地结构版本 v{{ version }}</el-tag>
     </el-header>

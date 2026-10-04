@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, onBeforeUnmount, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { useClockStore } from '../stores/clockStore';
@@ -7,32 +7,26 @@ import { useStepStore } from '../stores/stepStore';
 import { useClockSearch } from '../hooks/useClockSearch';
 import ClockCard from '../components/common/ClockCard.vue';
 import { CLOCK_KINDS, CONDITION_GRADES, type ClockDraft, type ClockKind, type ConditionGrade } from '../types/clock';
+import { REPAIR_STATES, repairStateOf, type RepairState, pendingProofCount } from '../utils/repairState';
+import { onChange } from '../utils/crossTab';
 
 const router = useRouter();
 const clockStore = useClockStore();
 const stepStore = useStepStore();
 const { filters, result, options, reset } = useClockSearch();
 
-const REPAIR_STATES = ['未开工', '维修中', '待测试', '已完成'] as const;
-
-type RepairState = (typeof REPAIR_STATES)[number];
-
-/** 由工序与走时测试推导修复状态，用于台账分栏 */
-function repairStateOf(clockId: string): RepairState {
-  const steps = stepStore.items.filter((s) => s.clockId === clockId);
-  const tests = stepStore.tests.filter((t) => t.clockId === clockId);
-  const done = steps.filter((s) => s.state === 'done').length;
-  if (steps.length === 0) return '未开工';
-  if (done === steps.length && tests.length > 0) return '已完成';
-  if (done === steps.length) return '待测试';
-  if (done > 0) return '维修中';
-  return '未开工';
+/** 由工序与「凭证有效且合格」的走时测试推导修复状态，用于台账分栏 */
+function stateOf(clockId: string): RepairState {
+  return repairStateOf(
+    stepStore.items.filter((s) => s.clockId === clockId),
+    stepStore.tests.filter((t) => t.clockId === clockId),
+  );
 }
 
 const columns = computed(() =>
   REPAIR_STATES.map((state) => ({
     state,
-    rows: result.value.filter((it) => repairStateOf(it.id) === state),
+    rows: result.value.filter((it) => stateOf(it.id) === state),
   })),
 );
 
@@ -76,10 +70,18 @@ async function submit() {
   form.dialMark = '';
 }
 
+const offCrossTab = onChange((topic) => {
+  if (topic === 'tests' || topic === 'instruments' || topic === 'clocks') {
+    void stepStore.loadTests();
+    if (topic === 'clocks') void clockStore.load();
+  }
+});
+
 onMounted(() => {
   void clockStore.load();
   void stepStore.load();
 });
+onBeforeUnmount(offCrossTab);
 </script>
 
 <template>
@@ -145,7 +147,13 @@ onMounted(() => {
           :item="item"
           :footer="`工序 ${stepStore.items.filter((s) => s.clockId === item.id && s.state === 'done').length}/${
             stepStore.items.filter((s) => s.clockId === item.id).length
-          } · 走时测试 ${stepStore.tests.filter((t) => t.clockId === item.id).length} 次`"
+          } · 有效测试 ${stepStore.tests.filter((t) => t.clockId === item.id && t.validity === 'valid').length}/${
+            stepStore.tests.filter((t) => t.clockId === item.id).length
+          }${
+            pendingProofCount(stepStore.tests.filter((t) => t.clockId === item.id))
+              ? ` · 待补证 ${pendingProofCount(stepStore.tests.filter((t) => t.clockId === item.id))}`
+              : ''
+          }`"
           @open="(id) => router.push(`/clocks/${id}`)"
         />
         <el-empty v-if="col.rows.length === 0" description="暂无" :image-size="60" />
